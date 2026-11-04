@@ -13,16 +13,33 @@ $oldPath = $env:PATH
 $oldTmp  = $env:TMP
 $oldTemp = $env:TEMP
 
-$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
 
-# gcc cannot create temp files under a non-ASCII path
-$env:TMP  = "C:\pc_build"
-$env:TEMP = "C:\pc_build"
-New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
 
-$GCC = "C:\msys64\mingw64\bin\gcc.exe"
-if (-not (Test-Path $GCC)) { $GCC = "gcc" }
+# gcc cannot create temporary files under a path containing non-ASCII
+# characters (a Chinese user name in %TEMP% is enough to break it), so prefer
+# an ASCII staging directory and fall back to the default temp dir.
+$asciiTmp = "C:\pc_build"
+try {
+    New-Item -ItemType Directory -Force -Path $asciiTmp -ErrorAction Stop | Out-Null
+    $probe = Join-Path $asciiTmp "_probe.tmp"
+    Set-Content -LiteralPath $probe -Value "x" -ErrorAction Stop
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    $env:TMP  = $asciiTmp
+    $env:TEMP = $asciiTmp
+}
+catch {
+    Write-Host "note: $asciiTmp not usable, using the default temp directory" -ForegroundColor Yellow
+}
 
+# Prefer MSYS2's gcc when present, otherwise trust PATH.
+$msysGcc = "C:\msys64\mingw64\bin\gcc.exe"
+if (Test-Path $msysGcc) {
+    $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+    $GCC = $msysGcc
+}
+else {
+    $GCC = "gcc"
+}
 Push-Location $PSScriptRoot
 try {
     Write-Host "[1/2] fbview.exe ..." -ForegroundColor Cyan
