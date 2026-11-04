@@ -1,13 +1,11 @@
-# EmbeddedScreenPreview build script
+# EmbeddedScreenPreview build script (standalone, no external project required)
 #
-#   .\build.ps1               build fbview.exe + demo_adapter.dll
-#   .\build.ps1 -HostOnly     build the host only
+#   .\build.ps1               fbview.exe + demo_adapter.dll
+#   .\build.ps1 -HostOnly     host only
 #
-# Requires: gcc on PATH (MSYS2 mingw64 recommended).
+# Requires gcc (MSYS2 mingw64 recommended).
 
-param(
-    [switch] $HostOnly
-)
+param([switch] $HostOnly)
 
 $ErrorActionPreference = "Stop"
 
@@ -17,7 +15,7 @@ $oldTemp = $env:TEMP
 
 $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
 
-# gcc cannot create temp files under a non-ASCII path -> force an ASCII temp dir
+# gcc cannot create temp files under a non-ASCII path
 $env:TMP  = "C:\pc_build"
 $env:TEMP = "C:\pc_build"
 New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null

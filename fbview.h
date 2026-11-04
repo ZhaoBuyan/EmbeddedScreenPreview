@@ -19,6 +19,7 @@
 #define __FBVIEW_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* ============================================================================
  * 导出宏
@@ -94,6 +95,8 @@ FBVIEW_API void Pv_Touch(int x, int y, int pressed);
 /* Optional RGB LED output. index 0..2; return 0x00RRGGBB, or zero for off. */
 enum { FV_LED_COUNT = 3 };
 FBVIEW_API uint32_t Pv_LedColor(unsigned index);
+/* Optional virtual serial input. UTF-8 bytes with the selected line ending. */
+FBVIEW_API void Pv_SerialRx(const char *bytes, size_t length);
 
 /* ============================================================================
  * 适配器可用的工具（实现在适配器 DLL 自己里面）

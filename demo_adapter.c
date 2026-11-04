@@ -156,3 +156,22 @@ uint32_t Pv_LedColor(unsigned index)
     default: return 0;
     }
 }
+
+void Pv_SerialRx(const char *bytes, size_t length)
+{
+    while (length && (bytes[length - 1] == '\r' || bytes[length - 1] == '\n')) --length;
+    if (length == 4 && memcmp(bytes, "help", 4) == 0) {
+        puts("[demo] commands: help, status, echo <text>");
+    } else if (length == 6 && memcmp(bytes, "status", 6) == 0) {
+        printf("[demo] Temperature %.0f C, humidity %.0f %%, light %.0f lux\n",
+               s_temperature, s_humidity, s_light);
+        printf("[demo] LED 1 #%06lX, LED 2 #%06lX, LED 3 #%06lX\n",
+               (unsigned long)Pv_LedColor(0), (unsigned long)Pv_LedColor(1), (unsigned long)Pv_LedColor(2));
+    } else if (length >= 5 && memcmp(bytes, "echo ", 5) == 0) {
+        fputs("[demo] ", stdout);
+        fwrite(bytes + 5, 1, length - 5, stdout);
+        putchar('\n');
+    } else {
+        puts("[demo] Unknown command. Send help for the list.");
+    }
+}

@@ -23,6 +23,8 @@ typedef struct
 
     uint32_t (*LedColor)(unsigned index); /* optional */
 
+    void (*SerialRx)(const char *bytes, size_t length); /* optional */
+
     void *dll;              /* HMODULE，仅内部用 */
 } FvAdapter;
 
