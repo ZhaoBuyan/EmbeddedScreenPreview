@@ -1,0 +1,6 @@
+*.exe
+*.dll
+*.bmp
+*.png
+_fbview/
+screenshots/
