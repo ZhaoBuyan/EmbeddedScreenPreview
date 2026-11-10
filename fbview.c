@@ -14,12 +14,15 @@
 #define TOP 142
 #define BOTTOM 64
 #define GUTTER 24
-#define FIELD_BG RGB(230, 237, 239)
-#define CARD_BG RGB(248, 251, 251)
-#define INK RGB(22, 43, 52)
-#define MUTED RGB(68, 92, 102)
-#define ACCENT RGB(0, 99, 97)
-#define WARNING RGB(128, 69, 12)
+#define FIELD_BG RGB(244, 244, 240)
+#define CARD_BG RGB(255, 255, 253)
+#define INK RGB(36, 38, 34)
+#define MUTED RGB(98, 102, 93)
+#define BORDER RGB(222, 224, 215)
+#define ACCENT RGB(49, 91, 72)
+#define ACCENT_BG RGB(233, 242, 234)
+#define WARNING RGB(139, 64, 29)
+#define CONSOLE_BG RGB(27, 31, 29)
 #define PROJECT_ID 101
 #define ADD_ID 102
 #define LIMIT_ID 103
@@ -69,10 +72,12 @@ static HWND s_hwnd, s_projects, s_add, s_limit, s_status;
 static HFONT s_ui_font, s_heading_font, s_title_font, s_log_font;
 static HBRUSH s_card_brush, s_log_brush;
 static int s_english, s_step_pending;
+static int s_drag_log, s_log_drag_offset;
+static double s_log_fraction;
 #define TR(zh, en) (s_english ? (en) : (zh))
 static HWND s_language, s_serial_input, s_serial_eol, s_serial_send;
 static HWND s_terminal, s_terminal_title, s_sensor_title, s_sensor_help, s_reset;
-static HWND s_sensor_labels[3], s_sliders[3];
+static HWND s_sensor_labels[3], s_sensor_readouts[3], s_sliders[3];
 static HWND s_add_sensor, s_extra_picker, s_extra_label, s_extra_slider, s_open_demo;
 typedef struct {
     int id;
@@ -316,6 +321,16 @@ static void run_action(UINT id)
     sync_action_buttons();
 }
 
+static void advance_simulation(FvAdapter *ad, float dt)
+{
+    if (s_paused) {
+        if (!s_step_pending) return;
+        --s_step_pending;
+        dt = 1.0f / s_cfg.fps;
+    }
+    ad->Update(s_tx, s_ty, dt);
+}
+
 static void poll_input(float dt)
 {
     float dx = 0.0f, dy = 0.0f;
@@ -366,9 +381,15 @@ static void poll_input(float dt)
 
 int Fv_AddProject(const char *folder)
 {
-    char full[MAX_PATH]; DWORD n;
-    n = GetFullPathNameA(folder, sizeof(full), full, NULL);
-    if (!n || n >= sizeof(full)) return -1;
+    char full[MAX_PATH];
+#ifdef FV_BUILTIN_DEMO
+    if (strcmp(folder, FV_DEMO_PROJECT) == 0) strcpy(full, FV_DEMO_PROJECT);
+    else
+#endif
+    {
+        DWORD n = GetFullPathNameA(folder, sizeof(full), full, NULL);
+        if (!n || n >= sizeof(full)) return -1;
+    }
     while (strlen(full) > 3 && full[strlen(full)-1] == '\\') full[strlen(full)-1] = 0;
     for (int i = 0; i < s_project_count; ++i) if (_stricmp(full, s_folders[i]) == 0) return i;
     if (s_project_count == MAX_PROJECTS) return -1;
@@ -378,6 +399,7 @@ int Fv_AddProject(const char *folder)
 }
 typedef struct {
     RECT client, display, log, inputs, outputs;
+    int compact;
 } Dashboard;
 
 static int has_sensor_inputs(void)
@@ -385,22 +407,37 @@ static int has_sensor_inputs(void)
     return s_ad && s_ad->SetSensor;
 }
 
+static int log_height_for_client(int height, double fraction)
+{
+    int maximum = height - TOP - BOTTOM - 140;
+    if (maximum < 164) maximum = 164;
+    int log_height = (int)(height * (fraction > 0 ? fraction : 0.22) + 0.5);
+    if (fraction <= 0 && log_height > 220) log_height = 220;
+    if (log_height < 164) return 164;
+    return log_height > maximum ? maximum : log_height;
+}
+
 static Dashboard dashboard(void)
 {
     Dashboard d = {0};
     GetClientRect(s_hwnd, &d.client);
-    int log_height = d.client.bottom * 22 / 100;
-    if (log_height < 164) log_height = 164;
-    if (log_height > 220) log_height = 220;
+    int log_height = log_height_for_client(d.client.bottom, s_log_fraction);
+    d.compact = d.client.bottom < 725;
     int log_top = d.client.bottom - log_height;
     int right = d.client.right - PANEL - GUTTER;
-    int output_top = !has_sensor_inputs() ? 235 : s_active_extra ? 536 : 426;
+    int output_top = !has_sensor_inputs() ? 235 : s_active_extra
+        ? (d.compact ? 486 : 536) : (d.compact ? 382 : 426);
     int panel_bottom = d.client.bottom - GUTTER;
     d.display = (RECT){GUTTER + 10, TOP, right - GUTTER - 10, log_top - BOTTOM};
     d.log = (RECT){GUTTER, log_top, right - GUTTER, panel_bottom};
     d.inputs = (RECT){right, 105, right + PANEL, output_top - 12};
-    d.outputs = (RECT){right, output_top, right + PANEL, output_top + 146};
+    d.outputs = (RECT){right, output_top, right + PANEL, output_top + 128};
     return d;
+}
+
+static RECT log_splitter(Dashboard d)
+{
+    return (RECT){d.log.left, d.log.top - 8, d.log.right, d.log.top};
 }
 
 static FvViewport fitted_display(RECT area)
@@ -485,10 +522,11 @@ static void add_extra_sensor(void)
 
 static void update_base_readout(int index)
 {
-    if (!s_sensor_labels[index]) return;
+    if (!s_sensor_readouts[index]) return;
     wchar_t text[96];
-    swprintf(text, 96, L"%ls  %d %ls", TR(s_sensor_names[index], s_sensor_en[index]), s_sensor_values[index], s_sensor_units[index]);
-    SetWindowTextW(s_sensor_labels[index], text);
+    swprintf(text, 96, L"%d %ls", s_sensor_values[index], s_sensor_units[index]);
+    SetWindowTextW(s_sensor_labels[index], TR(s_sensor_names[index], s_sensor_en[index]));
+    SetWindowTextW(s_sensor_readouts[index], text);
 }
 
 static void refresh_sensors(int reset)
@@ -496,7 +534,7 @@ static void refresh_sensors(int reset)
     int supported = has_sensor_inputs();
     int visibility = supported ? SW_SHOWNA : SW_HIDE;
     if (s_sensor_help) SetWindowTextW(s_sensor_help, supported ?
-        TR(L"调整输入，查看 LCD、指示灯和日志。", L"Adjust inputs and watch the preview.") :
+        TR(L"调节输入，观察画面和灯光。", L"Adjust inputs to test the project.") :
         TR(L"当前项目未接入传感器。可打开 Demo 体验外设。", L"No sensor inputs. Open Demo to try them."));
     for (int i = 0; i < 3; ++i) {
         if (reset) s_sensor_values[i] = s_sensor_default[i];
@@ -504,13 +542,14 @@ static void refresh_sensors(int reset)
             SendMessageA(s_sliders[i], TBM_SETPOS, TRUE, s_sensor_values[i]);
             ShowWindow(s_sliders[i], visibility);
             ShowWindow(s_sensor_labels[i], visibility);
+            ShowWindow(s_sensor_readouts[i], visibility);
         }
         update_base_readout(i);
-        if (supported) s_ad->SetSensor(i + 1, (float)s_sensor_values[i]);
+        if (supported && reset) s_ad->SetSensor(i + 1, (float)s_sensor_values[i]);
     }
     for (size_t i = 0; i < EXTRA_COUNT; ++i) {
         if (reset) s_extra[i].value = s_extra[i].initial;
-        if (supported && s_extra[i].added) s_ad->SetSensor(s_extra[i].id, (float)s_extra[i].value);
+        if (supported && reset && s_extra[i].added) s_ad->SetSensor(s_extra[i].id, (float)s_extra[i].value);
     }
     if (s_add_sensor) {
         ShowWindow(s_add_sensor, visibility);
@@ -529,9 +568,10 @@ static void layout(HWND hwnd)
     int log_y = d.log.top;
     int reload_x = d.inputs.right - s_actions[0].width;
     int add_x = reload_x - 8 - 110;
-    MoveWindow(s_projects, GUTTER, 67, add_x - GUTTER - 8, 340, FALSE);
-    MoveWindow(s_add, add_x, 65, 110, 30, FALSE);
-    MoveWindow(s_actions[0].window, reload_x, 65, s_actions[0].width, 30, FALSE);
+    int project_x = GUTTER + 88;
+    MoveWindow(s_projects, project_x, 66, add_x - project_x - 8, 340, FALSE);
+    MoveWindow(s_add, add_x, 62, 110, 30, FALSE);
+    MoveWindow(s_actions[0].window, reload_x, 62, s_actions[0].width, 30, FALSE);
     int action_x = d.log.right - 12;
     for (size_t i = ACTION_COUNT; i-- > 1;) {
         action_x -= s_actions[i].width;
@@ -539,8 +579,8 @@ static void layout(HWND hwnd)
         action_x -= 6;
     }
     const int limit_width = 176;
-    MoveWindow(s_limit, d.log.right - 16 - limit_width, d.display.bottom + 12, limit_width, 260, FALSE);
-    MoveWindow(s_status, GUTTER + 16, d.display.bottom + 9, left_width - 42 - limit_width, 39, FALSE);
+    MoveWindow(s_limit, d.log.right - 16 - limit_width, d.display.bottom + 27, limit_width, 260, FALSE);
+    MoveWindow(s_status, GUTTER + 16, d.display.bottom + 6, left_width - 42 - limit_width, 50, FALSE);
     MoveWindow(s_terminal_title, GUTTER + 16, log_y + 12, left_width - 32, 24, FALSE);
     int input_y = d.log.bottom - 40;
     MoveWindow(s_terminal, GUTTER + 16, log_y + 40, left_width - 32, input_y - log_y - 48, FALSE);
@@ -550,15 +590,21 @@ static void layout(HWND hwnd)
     MoveWindow(s_language, d.inputs.right - 96, 20, 96, 29, FALSE);
     MoveWindow(s_sensor_title, right + 16, 117, PANEL - 32, 28, FALSE);
     MoveWindow(s_sensor_help, right + 16, 150, PANEL - 32, has_sensor_inputs() ? 30 : 42, FALSE);
+    int base_top = d.compact ? 198 : 211;
+    int row_height = d.compact ? 44 : 52;
+    int buttons_top = d.compact ? 340 : 376;
+    int extra_top = d.compact ? 395 : 440;
     for (int i = 0; i < 3; ++i) {
-        MoveWindow(s_sensor_labels[i], right + 16, 211 + i * 52, PANEL - 32, 20, FALSE);
-        MoveWindow(s_sliders[i], right + 16, 231 + i * 52, PANEL - 32, 25, FALSE);
+        int y = base_top + i * row_height;
+        MoveWindow(s_sensor_labels[i], right + 16, y, PANEL - 132, 20, FALSE);
+        MoveWindow(s_sensor_readouts[i], right + PANEL - 108, y, 92, 20, FALSE);
+        MoveWindow(s_sliders[i], right + 12, y + 20, PANEL - 24, 23, FALSE);
     }
-    MoveWindow(s_add_sensor, right + 16, 376, 126, 30, FALSE);
-    MoveWindow(s_reset, right + 152, 376, PANEL - 168, 30, FALSE);
-    MoveWindow(s_extra_picker, right + 16, 440, PANEL - 32, 190, FALSE);
-    MoveWindow(s_extra_label, right + 16, 470, PANEL - 32, 20, FALSE);
-    MoveWindow(s_extra_slider, right + 16, 491, PANEL - 32, 25, FALSE);
+    MoveWindow(s_add_sensor, right + 16, buttons_top, 126, 30, FALSE);
+    MoveWindow(s_reset, right + 152, buttons_top, PANEL - 168, 30, FALSE);
+    MoveWindow(s_extra_picker, right + 16, extra_top, PANEL - 32, 190, FALSE);
+    MoveWindow(s_extra_label, right + 16, extra_top + 29, PANEL - 32, 20, FALSE);
+    MoveWindow(s_extra_slider, right + 16, extra_top + 49, PANEL - 32, 25, FALSE);
     MoveWindow(s_open_demo, right + 16, 190, PANEL - 32, 28, FALSE);
     RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE);
 }
@@ -592,21 +638,23 @@ static void paint_leds(HDC dc, RECT region)
               TR(L"当前项目未接入灯光输出", L"No LED output from this project"), DT_LEFT);
         return;
     }
+    int slot = (PANEL - 32) / FV_LED_COUNT;
     for (int i = 0; i < FV_LED_COUNT; ++i) {
-        int center = right + 54 + i * 81;
+        int x = right + 16 + i * slot;
+        int center = x + (slot - 6) / 2;
         uint32_t color = s_led_colors[i];
-        COLORREF fill = color ? RGB((color >> 16) & 255, (color >> 8) & 255, color & 255) : RGB(52, 68, 74);
-        RECT bezel = {center - 18, top + 46, center + 18, top + 82};
-        RECT lens = {center - 13, top + 51, center + 13, top + 77};
-        panel(dc, bezel, RGB(212, 225, 228), RGB(160, 179, 185), 36);
-        panel(dc, lens, fill, RGB(44, 62, 69), 26);
+        COLORREF fill = color ? RGB((color >> 16) & 255, (color >> 8) & 255, color & 255) : RGB(177, 181, 171);
+        RECT tile = {x, top + 42, x + slot - 6, region.bottom - 14};
+        RECT lens = {center - 8, top + 50, center + 8, top + 66};
+        panel(dc, tile, FIELD_BG, BORDER, 10);
+        panel(dc, lens, fill, RGB(138, 144, 132), 16);
         wchar_t value[16];
         if (color) swprintf(value, 16, L"#%06lX", (unsigned long)color);
         else wcscpy(value, TR(L"熄灭", L"Off"));
         wchar_t name[] = L"LED 1";
         name[4] = (wchar_t)(L'1' + i);
-        label(dc, s_ui_font, INK, (RECT){center - 40, top + 88, center + 40, top + 107}, name, DT_CENTER);
-        label(dc, s_log_font, MUTED, (RECT){center - 40, top + 109, center + 40, top + 127}, value, DT_CENTER);
+        label(dc, s_ui_font, INK, (RECT){tile.left, top + 70, tile.right, top + 89}, name, DT_CENTER);
+        label(dc, s_log_font, MUTED, (RECT){tile.left, top + 89, tile.right, top + 108}, value, DT_CENTER);
     }
 }
 
@@ -638,27 +686,47 @@ static void paint(HDC dc)
     Dashboard d = dashboard();
     int right = d.inputs.left;
     int left_edge = d.log.right;
-    COLORREF border = RGB(181, 199, 205);
     HBRUSH background = CreateSolidBrush(FIELD_BG);
     FillRect(dc, &d.client, background);
     DeleteObject(background);
-    panel(dc, (RECT){GUTTER, 105, left_edge, d.log.top - 8}, CARD_BG, border, 14);
-    panel(dc, d.log, CARD_BG, border, 14);
-    panel(dc, d.inputs, CARD_BG, border, 14);
+    panel(dc, (RECT){GUTTER, 105, left_edge, d.log.top - 8}, CARD_BG, BORDER, 14);
+    panel(dc, d.log, CARD_BG, BORDER, 14);
+    panel(dc, (RECT){d.log.left + 13, d.log.top + 37, d.log.right - 13, d.log.bottom - 45},
+          CONSOLE_BG, CONSOLE_BG, 8);
+    RECT splitter = log_splitter(d);
+    int grip_x = (splitter.left + splitter.right) / 2;
+    RECT grip = {grip_x - 30, splitter.top + 2, grip_x + 30, splitter.bottom - 2};
+    COLORREF grip_color = s_drag_log ? ACCENT : RGB(157, 162, 150);
+    panel(dc, grip, grip_color, grip_color, 4);
+    panel(dc, d.inputs, CARD_BG, BORDER, 14);
     RECT outputs = d.outputs;
     if (!s_led_connected) outputs.bottom = outputs.top + 76;
-    panel(dc, outputs, CARD_BG, border, 14);
-    panel(dc, d.display, RGB(14, 26, 32), RGB(14, 26, 32), 8);
+    panel(dc, outputs, CARD_BG, BORDER, 14);
+    FillRect(dc, &d.display, (HBRUSH)GetStockObject(BLACK_BRUSH));
     if (has_sensor_inputs()) {
-        label(dc, s_ui_font, MUTED, (RECT){right + 16, 183, right + PANEL - 16, 206}, TR(L"基础输入", L"Built-in inputs"), DT_LEFT);
+        int base_heading = d.compact ? 178 : 183;
+        int extra_heading = d.compact ? 371 : 411;
+        label(dc, s_ui_font, MUTED, (RECT){right + 16, base_heading, right + PANEL - 16, base_heading + 20}, TR(L"基础输入", L"Built-in inputs"), DT_LEFT);
         if (s_active_extra)
-            label(dc, s_ui_font, MUTED, (RECT){right + 16, 411, right + PANEL - 16, 435}, TR(L"扩展输入", L"Added inputs"), DT_LEFT);
+            label(dc, s_ui_font, MUTED, (RECT){right + 16, extra_heading, right + PANEL - 16, extra_heading + 21}, TR(L"扩展输入", L"Added inputs"), DT_LEFT);
     }
-    label(dc, s_title_font, INK, (RECT){GUTTER, 14, right, 51}, TR(L"嵌入式模拟器", L"Embedded Workbench"), DT_LEFT);
+    RECT mark = {GUTTER, 19, GUTTER + 32, 51};
+    panel(dc, mark, ACCENT, ACCENT, 10);
+    panel(dc, (RECT){mark.left + 8, mark.top + 9, mark.right - 8, mark.bottom - 12},
+          ACCENT_BG, ACCENT_BG, 3);
+    panel(dc, (RECT){mark.left + 12, mark.bottom - 10, mark.right - 12, mark.bottom - 8},
+          ACCENT_BG, ACCENT_BG, 2);
+    label(dc, s_title_font, INK, (RECT){GUTTER + 44, 14, right, 54}, TR(L"嵌入式模拟器", L"Embedded Workbench"), DT_LEFT);
+    label(dc, s_ui_font, MUTED, (RECT){GUTTER, 62, GUTTER + 86, 92}, TR(L"当前项目", L"Project"), DT_LEFT);
     label(dc, s_heading_font, INK, (RECT){GUTTER + 16, 110, left_edge - 16, 138}, TR(L"LCD 预览", L"LCD preview"), DT_LEFT);
+    RECT badge = {GUTTER + 119, 113, GUTTER + 207, 135};
+    COLORREF badge_bg = s_stats.underrun ? RGB(250, 235, 221) : ACCENT_BG;
+    panel(dc, badge, badge_bg, badge_bg, 12);
     label(dc, s_ui_font, s_stats.underrun ? WARNING : ACCENT,
-          (RECT){GUTTER + 123, 110, GUTTER + 210, 138},
-          s_stats.underrun ? TR(L"带宽不足", L"Bandwidth low") : TR(L"扫描正常", L"Scanout OK"), DT_LEFT);
+          badge, s_stats.underrun ? TR(L"带宽不足", L"Underrun") : TR(L"扫描正常", L"Scanout OK"), DT_CENTER);
+    label(dc, s_ui_font, MUTED,
+          (RECT){left_edge - 192, d.display.bottom + 5, left_edge - 16, d.display.bottom + 25},
+          TR(L"SDRAM 带宽上限", L"SDRAM bandwidth limit"), DT_LEFT);
     paint_leds(dc, d.outputs);
     paint_lcd(dc, fitted_display(d.display));
 }
@@ -706,9 +774,12 @@ static void paint_button(const DRAWITEMSTRUCT *item)
     } else {
         FillRect(item->hDC, &r, s_card_brush);
     }
-    panel(item->hDC, r, disabled ? FIELD_BG : selected || active ? RGB(198, 222, 221) : RGB(218, 235, 234),
-          RGB(166, 194, 195), 8);
-    label(item->hDC, s_ui_font, disabled ? MUTED : ACCENT, r, caption, DT_CENTER);
+    int primary = item->CtlID == ADD_ID || item->CtlID == SERIAL_SEND_ID;
+    COLORREF fill = disabled ? FIELD_BG : primary ? (selected ? RGB(38, 72, 57) : ACCENT) :
+        selected || active ? ACCENT_BG : CARD_BG;
+    panel(item->hDC, r, fill, primary && !disabled ? fill : BORDER, 8);
+    label(item->hDC, s_ui_font, disabled ? MUTED : primary ? CARD_BG : active ? ACCENT : INK,
+          r, caption, DT_CENTER);
     if (item->itemState & ODS_FOCUS) {
         InflateRect(&r, -4, -4);
         DrawFocusRect(item->hDC, &r);
@@ -733,6 +804,9 @@ static void pick_project(void)
 }
 static void open_demo(void)
 {
+#ifdef FV_BUILTIN_DEMO
+    s_pending = Fv_AddProject(FV_DEMO_PROJECT);
+#else
     char path[MAX_PATH];
     DWORD length = GetModuleFileNameA(NULL, path, MAX_PATH);
     if (!length || length >= MAX_PATH) return;
@@ -740,6 +814,7 @@ static void open_demo(void)
     if (!slash) return;
     *slash = 0;
     s_pending = Fv_AddProject(path);
+#endif
 }
 
 static void set_bandwidth(size_t index)
@@ -749,13 +824,86 @@ static void set_bandwidth(size_t index)
     printf("[带宽] SDRAM 上限 %.2f MB/s（0 表示不限速）\n", s_cfg.memory.limit_mb_s);
 }
 
+static const char *const serial_endings[] = {"\n", "\r\n", "\r", ""};
+
+static void refresh_serial(int clear)
+{
+    if (!s_serial_input) return;
+    BOOL supported = s_ad && s_ad->SerialRx;
+    if (clear) SetWindowTextW(s_serial_input, L"");
+    EnableWindow(s_serial_input, supported);
+    EnableWindow(s_serial_eol, supported);
+    EnableWindow(s_serial_send, supported);
+    SendMessageW(s_serial_input, EM_SETCUEBANNER, TRUE, (LPARAM)(supported
+        ? TR(L"输入串口文本", L"Type serial text")
+        : TR(L"此项目未接入串口", L"Serial input unavailable")));
+}
+
+static void send_serial(void)
+{
+    if (!s_ad || !s_ad->SerialRx) return;
+    wchar_t text[241];
+    char bytes[sizeof(text) * 2 + 3];
+    if (!GetWindowTextW(s_serial_input, text, 241)) return;
+    int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1,
+        bytes, (int)sizeof(bytes) - 2, NULL, NULL);
+    if (!count) return;
+    printf("[TX] %s\n", bytes);
+    LRESULT row = SendMessageW(s_serial_eol, CB_GETCURSEL, 0, 0);
+    if (row < 0 || row >= (LRESULT)(sizeof(serial_endings) / sizeof(serial_endings[0]))) row = 0;
+    const char *ending = serial_endings[row];
+    size_t length = (size_t)count - 1, tail = strlen(ending);
+    memcpy(bytes + length, ending, tail + 1);
+    s_ad->SerialRx(bytes, length + tail);
+    SetWindowTextW(s_serial_input, L"");
+    SetFocus(s_serial_input);
+}
+
+static LRESULT CALLBACK serial_edit_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR id, DWORD_PTR data)
+{
+    (void)data;
+    if (msg == WM_CHAR && wp == L'\r') { send_serial(); return 0; }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, serial_edit_proc, id);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+static void apply_language(void)
+{
+    SetWindowTextW(s_language, TR(L"English", L"中文"));
+    SetWindowTextW(s_add, TR(L"添加项目…", L"Add project…"));
+    SetWindowTextW(s_terminal_title, TR(L"日志与串口", L"Log and serial"));
+    SetWindowTextW(s_sensor_title, TR(L"传感器", L"Sensors"));
+    SetWindowTextW(s_reset, TR(L"重置", L"Reset"));
+    SetWindowTextW(s_add_sensor, TR(L"添加传感器…", L"Add sensor…"));
+    SetWindowTextW(s_open_demo, TR(L"打开 Demo", L"Open Demo"));
+    SetWindowTextW(s_serial_send, TR(L"发送", L"Send"));
+    LRESULT eol = SendMessageW(s_serial_eol, CB_GETCURSEL, 0, 0);
+    SendMessageW(s_serial_eol, CB_RESETCONTENT, 0, 0);
+    const wchar_t *labels[] = {L"LF", L"CRLF", L"CR", TR(L"无行尾", L"No ending")};
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i)
+        SendMessageW(s_serial_eol, CB_ADDSTRING, 0, (LPARAM)labels[i]);
+    SendMessageW(s_serial_eol, CB_SETCURSEL, eol < 0 ? 0 : eol, 0);
+    SendMessageW(s_extra_picker, CB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < EXTRA_COUNT; ++i) if (s_extra[i].added) {
+        LRESULT row = SendMessageW(s_extra_picker, CB_ADDSTRING, 0, (LPARAM)TR(s_extra[i].name, s_extra[i].english));
+        if (row < 0) continue;
+        SendMessageW(s_extra_picker, CB_SETITEMDATA, row, i);
+        if (s_active_extra == &s_extra[i]) SendMessageW(s_extra_picker, CB_SETCURSEL, row, 0);
+    }
+    sync_action_buttons();
+    select_limit();
+    refresh_serial(0);
+    refresh_sensors(0);
+}
+
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_DESTROY: s_running = 0; PostQuitMessage(0); return 0;
     case WM_GETMINMAXINFO:
         ((MINMAXINFO *)lp)->ptMinTrackSize.x = 980;
-        ((MINMAXINFO *)lp)->ptMinTrackSize.y = 790; return 0;
+        ((MINMAXINFO *)lp)->ptMinTrackSize.y = 700; return 0;
     case WM_SIZE: if (s_projects) layout(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_DRAWITEM: {
@@ -769,8 +917,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HDC dc = (HDC)wp;
         HWND child = (HWND)lp;
         int terminal = child == s_terminal;
-        SetTextColor(dc, terminal ? RGB(221, 238, 238) : child == s_sensor_help ? MUTED : INK);
-        SetBkColor(dc, terminal ? RGB(22, 43, 52) : CARD_BG);
+        COLORREF color = child == s_sensor_help || child == s_status ? MUTED : INK;
+        for (int i = 0; i < 3; ++i)
+            if (child == s_sensor_readouts[i]) color = ACCENT;
+        SetTextColor(dc, terminal ? RGB(222, 231, 224) : color);
+        SetBkColor(dc, terminal ? CONSOLE_BG : CARD_BG);
         return (LRESULT)(terminal ? s_log_brush : s_card_brush);
     }
     case WM_PAINT: {
@@ -793,20 +944,65 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         }
         return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && (HWND)wp == hwnd) {
+            POINT pointer;
+            RECT splitter = log_splitter(dashboard());
+            if (GetCursorPos(&pointer) && ScreenToClient(hwnd, &pointer) &&
+                (s_drag_log || PtInRect(&splitter, pointer))) {
+                SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32645))); /* IDC_SIZENS */
+                return TRUE;
+            }
+        }
+        break;
+    case WM_LBUTTONDBLCLK: {
+        RECT splitter = log_splitter(dashboard());
+        POINT pointer = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (PtInRect(&splitter, pointer)) {
+            s_log_fraction = 0;
+            layout(hwnd);
+            return 0;
+        }
+        /* A double-click inside the LCD is still a second touch press. */
+    }
+    /* fall through */
     case WM_LBUTTONDOWN: {
         int x, y;
         SetFocus(hwnd);
+        Dashboard d = dashboard();
+        RECT splitter = log_splitter(d);
+        POINT pointer = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (PtInRect(&splitter, pointer)) {
+            s_drag_log = 1;
+            s_log_drag_offset = d.log.top - pointer.y;
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, &splitter, FALSE);
+            return 0;
+        }
         if (s_ad && s_ad->Touch && touch_position(lp, &x, &y)) {
             s_touching = 1; SetCapture(hwnd); s_ad->Touch(x, y, 1);
         }
         return 0;
     }
     case WM_MOUSEMOVE:
+        if (s_drag_log) {
+            Dashboard d = dashboard();
+            int height = d.client.bottom;
+            if (height > 0) {
+                int desired = height - GET_Y_LPARAM(lp) - s_log_drag_offset;
+                if (desired < 164) desired = 164;
+                int clamped = log_height_for_client(height, (double)desired / height);
+                s_log_fraction = (double)clamped / height;
+                if (height - clamped != d.log.top) layout(hwnd);
+            }
+            return 0;
+        }
         if (s_touching && s_ad && s_ad->Touch) {
             int x, y; if (touch_position(lp, &x, &y)) s_ad->Touch(x, y, 1);
         }
         return 0;
     case WM_LBUTTONUP:
+        if (s_drag_log) { ReleaseCapture(); return 0; }
         if (s_touching) {
             int x = 0, y = 0, inside = touch_position(lp, &x, &y);
             s_touching = 0; ReleaseCapture();
@@ -814,9 +1010,24 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_CAPTURECHANGED:
+        if (s_drag_log) {
+            s_drag_log = 0;
+            RECT splitter = log_splitter(dashboard());
+            InvalidateRect(hwnd, &splitter, FALSE);
+        }
         if (s_touching && s_ad && s_ad->Touch) s_ad->Touch(0, 0, -1);
         s_touching = 0; return 0;
     case WM_COMMAND:
+        if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == LANGUAGE_ID) {
+            s_english = !s_english;
+            apply_language();
+            SetFocus(hwnd);
+            return 0;
+        }
+        if (HIWORD(wp) == BN_CLICKED && LOWORD(wp) == SERIAL_SEND_ID) {
+            send_serial();
+            return 0;
+        }
         if (LOWORD(wp) >= ACTION_RELOAD && LOWORD(wp) <= ACTION_STEP && HIWORD(wp) == BN_CLICKED) {
             run_action(LOWORD(wp));
             SetFocus(hwnd);
@@ -893,6 +1104,7 @@ static int switch_project(int index)
     }
     if (s_ad->dll) FreeLibrary((HMODULE)s_ad->dll);
     *s_ad = candidate; destroy_surface(&old_surface);
+    refresh_serial(1);
     refresh_sensors(1);
     char log_path[MAX_PATH * 4];
     path_for_log(s_folders[index], log_path);
@@ -910,7 +1122,8 @@ fail:
     if (s_hwnd) {
         wchar_t details[1024];
         if (!MultiByteToWideChar(CP_UTF8, 0, err, -1, details, 1024))
-            wcscpy(details, L"无法加载适配器，请检查项目文件夹和构建日志。");
+            wcscpy(details, TR(L"无法加载适配器，请检查项目文件夹和构建日志。",
+                               L"Cannot load the adapter. Check the project folder and build log."));
         MessageBoxW(s_hwnd, details, TR(L"项目切换失败", L"Project switch failed"), MB_OK | MB_ICONERROR);
     }
     else fprintf(stderr, "Project switch failed: %s\n", err);
@@ -936,24 +1149,30 @@ int Fv_RunHost(const char *folder, const FvConfig *cfg, FvAdapter *ad)
     INITCOMMONCONTROLSEX controls = {sizeof(controls), ICC_BAR_CLASSES};
     InitCommonControlsEx(&controls);
     rc.right = 1280; rc.bottom = 850;
+    s_english = PRIMARYLANGID(GetUserDefaultUILanguage()) != LANG_CHINESE;
     s_cfg = *cfg; s_ad = ad; s_current = Fv_AddProject(folder);
     strcpy(s_folder, s_folders[s_current]); s_running = 1;
     if (create_surface(&s_surface, cfg->width, cfg->height) != 0) return 1;
     s_card_brush = CreateSolidBrush(CARD_BG);
-    s_log_brush = CreateSolidBrush(INK);
+    s_log_brush = CreateSolidBrush(CONSOLE_BG);
     s_ui_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
         0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     s_heading_font = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
         0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    s_title_font = CreateFontW(-29, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+    s_title_font = CreateFontW(-25, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
         0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     s_log_font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
         0, 0, CLEARTYPE_QUALITY, 0, L"Consolas");
     bind_surface();
-    wc.cbSize = sizeof(wc); wc.lpfnWndProc = wnd_proc; wc.hInstance = inst;
+    wc.cbSize = sizeof(wc); wc.style = CS_DBLCLKS; wc.lpfnWndProc = wnd_proc; wc.hInstance = inst;
     wc.hCursor = LoadCursorA(NULL, (LPCSTR)IDC_ARROW); wc.lpszClassName = L"EmbeddedScreenPreviewHost";
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) { result = 1; goto done; }
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, FALSE);
+    RECT work;
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+        if (rc.right - rc.left > work.right - work.left) rc.right = rc.left + work.right - work.left;
+        if (rc.bottom - rc.top > work.bottom - work.top) rc.bottom = rc.top + work.bottom - work.top;
+    }
     s_hwnd = CreateWindowExW(0, wc.lpszClassName, TR(L"嵌入式模拟器", L"Embedded Workbench"),
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
         rc.right-rc.left, rc.bottom-rc.top, NULL, NULL, inst, NULL);
@@ -983,11 +1202,13 @@ int Fv_RunHost(const char *folder, const FvConfig *cfg, FvAdapter *ad)
     s_sensor_help = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 100, 60, s_hwnd, NULL, inst, NULL);
     for (int i = 0; i < 3; ++i) {
         s_sensor_labels[i] = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 100, 24, s_hwnd, NULL, inst, NULL);
-        s_sliders[i] = CreateWindowExA(0, TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
+        s_sensor_readouts[i] = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            0, 0, 100, 24, s_hwnd, NULL, inst, NULL);
+        s_sliders[i] = CreateWindowExA(0, TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
             0, 0, 100, 36, s_hwnd, (HMENU)(INT_PTR)(SENSOR_BASE + i), inst, NULL);
+        if (!s_sensor_labels[i] || !s_sensor_readouts[i] || !s_sliders[i]) { result = 1; goto done; }
         SendMessageA(s_sliders[i], TBM_SETRANGEMIN, FALSE, s_sensor_min[i]);
         SendMessageA(s_sliders[i], TBM_SETRANGEMAX, TRUE, s_sensor_max[i]);
-        SendMessageA(s_sliders[i], TBM_SETTICFREQ, (s_sensor_max[i] - s_sensor_min[i]) / 5, 0);
     }
     s_reset = CreateWindowExW(0, L"BUTTON", L"重置", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 100, 30, s_hwnd, (HMENU)RESET_ID, inst, NULL);
     s_add_sensor = CreateWindowExW(0, L"BUTTON", L"添加传感器…", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -996,24 +1217,35 @@ int Fv_RunHost(const char *folder, const FvConfig *cfg, FvAdapter *ad)
         0, 0, 100, 190, s_hwnd, (HMENU)EXTRA_SENSOR_ID, inst, NULL);
     s_extra_label = CreateWindowExW(0, L"STATIC", L"", WS_CHILD,
         0, 0, 100, 22, s_hwnd, NULL, inst, NULL);
-    s_extra_slider = CreateWindowExA(0, TRACKBAR_CLASSA, "", WS_CHILD | TBS_HORZ | TBS_AUTOTICKS,
+    s_extra_slider = CreateWindowExA(0, TRACKBAR_CLASSA, "", WS_CHILD | TBS_HORZ | TBS_NOTICKS,
         0, 0, 100, 30, s_hwnd, NULL, inst, NULL);
     s_open_demo = CreateWindowExW(0, L"BUTTON", L"打开 Demo", WS_CHILD | BS_OWNERDRAW,
         0, 0, 100, 28, s_hwnd, (HMENU)OPEN_DEMO_ID, inst, NULL);
     if (!s_open_demo || !s_add_sensor || !s_extra_picker || !s_extra_label || !s_extra_slider) { result = 1; goto done; }
+    s_language = CreateWindowExW(0, L"BUTTON", L"English", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        0, 0, 96, 29, s_hwnd, (HMENU)LANGUAGE_ID, inst, NULL);
+    s_serial_input = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        0, 0, 200, 27, s_hwnd, NULL, inst, NULL);
+    s_serial_eol = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        0, 0, 92, 180, s_hwnd, NULL, inst, NULL);
+    s_serial_send = CreateWindowExW(0, L"BUTTON", L"发送", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        0, 0, 68, 27, s_hwnd, (HMENU)SERIAL_SEND_ID, inst, NULL);
+    if (!s_language || !s_serial_input || !s_serial_eol || !s_serial_send ||
+        !SetWindowSubclass(s_serial_input, serial_edit_proc, 1, 0)) { result = 1; goto done; }
+    SendMessageW(s_serial_input, EM_LIMITTEXT, 240, 0);
     for (HWND child = GetWindow(s_hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
         HFONT font = child == s_terminal ? s_log_font :
             child == s_sensor_title || child == s_terminal_title ? s_heading_font : s_ui_font;
         SendMessageW(child, WM_SETFONT, (WPARAM)font, TRUE);
     }
     SendMessageW(s_terminal, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(10, 10));
-    SendMessageA(s_projects, CB_SETCURSEL, s_current, 0); select_limit(); layout(s_hwnd);
+    SendMessageA(s_projects, CB_SETCURSEL, s_current, 0);
     if (Fv_TerminalStart(s_terminal) != 0) SetWindowTextW(s_terminal, TR(L"无法打开会话日志。输出仍显示在启动终端中。", L"Cannot open the log. Output remains in the launching terminal."));
     char log_path[MAX_PATH * 4];
     path_for_log(s_folder, log_path);
     printf("[项目] %s\n", log_path);
     if (ad->Attach(&s_host) != 0) { result = 1; goto done; }
-    refresh_sensors(1); refresh_leds(); Fv_TerminalPump();
+    refresh_sensors(1); apply_language(); refresh_leds(); Fv_TerminalPump();
     ShowWindow(s_hwnd, SW_SHOW); SetFocus(s_hwnd); timer_init();
     DWORD last_readout = GetTickCount() - 250;
     int last_underrun = -1;
@@ -1033,14 +1265,9 @@ int Fv_RunHost(const char *folder, const FvConfig *cfg, FvAdapter *ad)
                 MessageBoxW(s_hwnd, TR(L"适配器重载失败。请重新构建后启动。", L"Rebuild the adapter before restarting the preview."), TR(L"重载失败", L"Reload failed"), MB_OK | MB_ICONERROR);
                 result = 1; break;
             }
-            refresh_sensors(1); printf("[host] Adapter reloaded\n"); timer_init(); dt = 1.0f / s_cfg.fps;
+            refresh_serial(1); refresh_sensors(1); s_step_pending = 0; printf("[host] Adapter reloaded\n"); timer_init(); dt = 1.0f / s_cfg.fps;
         }
-        if (s_paused && s_step_pending) {
-            --s_step_pending;
-            ad->Update(s_tx, s_ty, 1.0f / s_cfg.fps);
-        } else if (!s_paused) {
-            ad->Update(s_tx, s_ty, dt);
-        }
+        advance_simulation(ad, dt);
         ad->Render();
         refresh_leds();
         if (s_debug) {
@@ -1056,10 +1283,10 @@ int Fv_RunHost(const char *folder, const FvConfig *cfg, FvAdapter *ad)
             last_project = s_current;
             last_underrun = s_stats.underrun;
             swprintf(status, 512,
-                TR(L"%dx%d RGB565 / %.0f Hz   读 %.2f / 写估 %.2f MB/s\r\n"
-                   L"需求 %.2f / 实际 %.2f MB/s   缺失 %.1f%%（%lu 帧）",
-                   L"%dx%d RGB565 / %.0f Hz   Read %.2f / Write est. %.2f MB/s\r\n"
-                   L"Demand %.2f / Actual %.2f MB/s   Missing %.1f%% (%lu frames)"),
+                TR(L"%d × %d  RGB565  ·  %.0f Hz\r\n读 %.2f / 写估 %.2f MB/s\r\n"
+                   L"需求 %.2f / 实际 %.2f MB/s  ·  缺失 %.1f%%（%lu 帧）",
+                   L"%d × %d  RGB565  ·  %.0f Hz\r\nRead %.2f / Write est. %.2f MB/s\r\n"
+                   L"Demand %.2f / Actual %.2f MB/s  ·  Missing %.1f%% (%lu)"),
             s_surface.w, s_surface.h, s_cfg.memory.scan_hz, s_stats.read_mb_s, s_stats.write_mb_s, s_stats.demand_mb_s,
             s_stats.delivered_mb_s, 100.0 * s_stats.missing_pixels / ((double)s_surface.w * s_surface.h), s_underrun_frames);
             SetWindowTextW(s_status, status);
@@ -1090,6 +1317,7 @@ done:
     printf("[host] Session closed\n"); Fv_TerminalStop();
     if (s_hwnd && IsWindow(s_hwnd)) DestroyWindow(s_hwnd);
     s_hwnd = s_projects = s_add = s_limit = s_status = NULL;
+    s_language = s_serial_input = s_serial_eol = s_serial_send = NULL;
     for (size_t i = 0; i < ACTION_COUNT; ++i) s_actions[i].window = NULL;
     DeleteObject(s_card_brush); DeleteObject(s_log_brush);
     DeleteObject(s_ui_font); DeleteObject(s_heading_font); DeleteObject(s_title_font); DeleteObject(s_log_font);

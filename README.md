@@ -40,7 +40,15 @@ The window is a workbench, not just a raw framebuffer:
 | **Added inputs** | temperature / humidity / light / pressure / distance / voltage / potentiometer, if the adapter exports `Pv_SetSensor` |
 | **Log** | the project's `stdout` / `stderr`, captured in-window |
 
-The UI is bilingual — Chinese or English, following the system locale.
+The initial language follows Windows. Use **中文 / English** at the top right to switch during a session. The project and input values stay in place. Adapter output is shown as written.
+
+Drag the handle between the LCD preview and the log to resize both panels. Double-click the handle to restore the default split. The sensor panel uses a tighter layout in shorter windows.
+
+The LCD header shows scanout status. Use the SDRAM bandwidth limit below the preview to reproduce underruns. On the right, each sensor shows its current value beside its name, and each RGB indicator shows its output color.
+
+Click **Step frame** to pause the simulation and run one update at the configured frame rate. Use **Resume** to return to continuous updates.
+
+To try the serial input, open the built-in Demo (`.\fbview.exe -dir .`). Enter `help`, `status`, or `echo hello` below the log and press Enter or **Send**. The ending selector supports LF, CRLF, CR and no ending. A project can enable this input by exporting `Pv_SerialRx(const char *bytes, size_t length)`. The host passes UTF-8 bytes and the selected ending. Replies written to stdout appear in the log.
 
 ---
 
@@ -70,6 +78,12 @@ Your `game.c`, `app.c`, `render.c` — or whatever draws — stays untouched. Yo
 a thin adapter file and a small `preview.ini`.
 
 ---
+
+## Windows Release
+
+Download `EmbeddedScreenPreview.exe` from Releases and double-click it to open the built-in Demo. Use **Add project** to open a project folder with a compatible x64 adapter DLL. Projects that supply only source files need GCC for adapter compilation.
+
+Maintainers can run `.\build.ps1 -Release` to produce `dist/EmbeddedScreenPreview.exe` and print its SHA-256 checksum. The Demo and license are embedded in the executable.
 
 ## Quick start
 

@@ -2,10 +2,11 @@
 #
 #   .\build.ps1               fbview.exe + demo_adapter.dll
 #   .\build.ps1 -HostOnly     host only
+#   .\build.ps1 -Release      single Windows x64 release executable
 #
 # Requires gcc (MSYS2 mingw64 recommended).
 
-param([switch] $HostOnly)
+param([switch] $HostOnly, [switch] $Release)
 
 $ErrorActionPreference = "Stop"
 
@@ -42,6 +43,23 @@ else {
 }
 Push-Location $PSScriptRoot
 try {
+    if ($Release) {
+        $target = & $GCC -dumpmachine
+        if ($LASTEXITCODE -ne 0 -or $target -ne 'x86_64-w64-mingw32') {
+            throw 'The Release build requires x64 MinGW GCC.'
+        }
+        New-Item -ItemType Directory -Force -Path 'dist', '_fbview' | Out-Null
+        $windres = & $GCC -print-prog-name=windres
+        & $windres release.rc -O coff -o _fbview/release-res.o
+        if ($LASTEXITCODE -ne 0) { throw 'Release resource build failed' }
+        & $GCC -std=c11 -O2 -Wall -Wextra -Wno-cast-function-type -I. `
+            -DFV_BUILTIN_DEMO -mwindows -static-libgcc -s -o dist/EmbeddedScreenPreview.exe `
+            fbview_main.c fbview.c fbview_loader.c fv_sim.c fv_terminal.c demo_adapter.c _fbview/release-res.o `
+            -lgdi32 -luser32 -lshell32 -lole32 -lcomctl32
+        if ($LASTEXITCODE -ne 0) { throw 'Release executable build failed' }
+        Get-FileHash -LiteralPath 'dist/EmbeddedScreenPreview.exe' -Algorithm SHA256
+        return
+    }
     Write-Host "[1/2] fbview.exe ..." -ForegroundColor Cyan
     & $GCC -std=c11 -O2 -Wall -Wextra -Wno-cast-function-type -I. -o fbview.exe `
         fbview_main.c fbview.c fbview_loader.c fv_sim.c fv_terminal.c `

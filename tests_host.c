@@ -1,6 +1,52 @@
 /* Real DLL integration, including different framebuffer dimensions. */
 #include "fbview.c"
 #include <assert.h>
+static unsigned updates;
+static float update_dt;
+static void record_update(float tx, float ty, float dt)
+{
+    (void)tx;
+    (void)ty;
+    ++updates;
+    update_dt = dt;
+}
+
+static void test_single_frame(void)
+{
+    FvAdapter probe = {.Update = record_update};
+    run_action(ACTION_STEP);
+    advance_simulation(&probe, 0.09f);
+    advance_simulation(&probe, 0.09f);
+    assert(s_paused && updates == 1 && update_dt == 1.0f / s_cfg.fps);
+    run_action(ACTION_PAUSE);
+    advance_simulation(&probe, 0.09f);
+    assert(!s_paused && updates == 2 && update_dt == 0.09f);
+}
+
+static void test_resizable_dashboard(void)
+{
+    s_hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+        0, 0, 1080, 660, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    assert(s_hwnd);
+    s_active_extra = &s_extra[0];
+    Dashboard initial = dashboard();
+    assert(initial.compact && initial.outputs.bottom <= initial.client.bottom - GUTTER);
+    assert(initial.log.top < initial.log.bottom);
+    s_log_fraction = 0.5;
+    Dashboard enlarged = dashboard();
+    assert(enlarged.log.top < initial.log.top && enlarged.display.bottom < initial.display.bottom);
+    s_log_fraction = 1.0;
+    Dashboard maximum = dashboard();
+    assert(maximum.display.bottom - maximum.display.top >= 140);
+    assert(log_height_for_client(660, 0.05) == 164);
+    RECT splitter = log_splitter(maximum);
+    assert(splitter.bottom == maximum.log.top && splitter.top == maximum.log.top - 8);
+    DestroyWindow(s_hwnd);
+    s_hwnd = NULL;
+    s_active_extra = NULL;
+    s_log_fraction = 0;
+}
+
 int main(int argc, char **argv)
 {
     FvAdapter ad = {0}; char err[1024]; int small, bad; uint16_t *old_fb;
@@ -11,7 +57,9 @@ int main(int argc, char **argv)
     strcpy(s_folder, s_folders[s_current]);
     assert(create_surface(&s_surface, s_cfg.width, s_cfg.height) == 0);
     bind_surface(); assert(ad.Attach(&s_host) == 0);
-    assert(ad.SetSensor && ad.LedColor);
+    assert(ad.SetSensor && ad.LedColor && ad.SerialRx);
+    test_single_frame();
+    test_resizable_dashboard();
     refresh_sensors(1); refresh_leds();
     uint32_t normal[FV_LED_COUNT];
     memcpy(normal, s_led_colors, sizeof(normal));

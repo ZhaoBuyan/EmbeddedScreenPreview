@@ -71,6 +71,10 @@ int Fv_ReadConfig(const char *folder, FvConfig *cfg)
     cfg->memory.scan_hz = 60;
     cfg->memory.write_passes = 1;
 
+#ifdef FV_BUILTIN_DEMO
+    if (strcmp(folder, FV_DEMO_PROJECT) == 0) return 0;
+#endif
+
     _snprintf(path, sizeof(path), "%s\\preview.ini", folder);
     path[sizeof(path) - 1] = '\0';
 
@@ -385,13 +389,24 @@ int Fv_LoadAdapter(const char *folder, const FvConfig *cfg,
     if (err && err_size > 0) { err[0] = '\0'; }
     if (folder == NULL || cfg == NULL || out == NULL) { return -1; }
 
-    ensure_tmp_dir();
 
     /* 记住，供热键 R 用 */
     strncpy(s_last_folder, folder, sizeof(s_last_folder) - 1);
     s_last_folder[sizeof(s_last_folder) - 1] = '\0';
     s_last_cfg  = *cfg;
     s_have_last = 1;
+
+#ifdef FV_BUILTIN_DEMO
+    if (strcmp(folder, FV_DEMO_PROJECT) == 0) {
+        *out = (FvAdapter){
+            .Attach = Pv_Attach, .Update = Pv_Update, .Render = Pv_Render,
+            .Key = Pv_Key, .Title = Pv_Title, .SetSensor = Pv_SetSensor,
+            .Touch = Pv_Touch, .LedColor = Pv_LedColor, .SerialRx = Pv_SerialRx
+        };
+        return 0;
+    }
+#endif
+    ensure_tmp_dir();
 
     /* ---------- ① ini 里指定了 dll ---------- */
     if (cfg->dll[0] != '\0')

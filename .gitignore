@@ -7,3 +7,6 @@ screenshots/
 
 # 但演示图要进仓库
 !docs/*.png
+
+# Local release artifacts
+/dist/

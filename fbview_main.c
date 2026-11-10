@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <io.h>
 
 #include "fbview_host.h"
 
@@ -87,6 +88,11 @@ int main(int argc, char **argv)
     int        list_only = 0;
     int        have_export = 0;
 
+#ifdef FV_BUILTIN_DEMO
+    /* Explorer does not provide console streams to a Windows-subsystem app. */
+    if (_fileno(stdout) < 0) freopen("NUL", "w", stdout);
+    if (_fileno(stderr) < 0) freopen("NUL", "w", stderr);
+#endif
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     folder[0] = '\0';
     export_path[0] = '\0';
@@ -124,6 +130,9 @@ int main(int argc, char **argv)
         }
     }
 
+#ifdef FV_BUILTIN_DEMO
+    if (!folder[0]) strcpy(folder, FV_DEMO_PROJECT);
+#endif
     /* ---------- ① 选文件夹 ---------- */
     if (folder[0] == '\0')
     {
@@ -135,7 +144,11 @@ int main(int argc, char **argv)
     }
 
     {
+#ifdef FV_BUILTIN_DEMO
+        DWORD a = strcmp(folder, FV_DEMO_PROJECT) == 0 ? FILE_ATTRIBUTE_DIRECTORY : GetFileAttributesA(folder);
+#else
         DWORD a = GetFileAttributesA(folder);
+#endif
         if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY))
         {
             show_error("这个路径不是有效的文件夹。");
@@ -165,7 +178,7 @@ int main(int argc, char **argv)
     if (list_only)
     {
         printf("(-list) 只检查，不运行。\n");
-        FreeLibrary((HMODULE)adapter.dll);
+        if (adapter.dll) FreeLibrary((HMODULE)adapter.dll);
         return 0;
     }
 
@@ -173,6 +186,9 @@ int main(int argc, char **argv)
     if (have_export)
         result = Fv_RunHeadless(&cfg, &adapter, export_path);
     else {
+#ifdef FV_BUILTIN_DEMO
+        Fv_AddProject(FV_DEMO_PROJECT);
+#else
         /* Make the bundled demo and game available in the project selector. */
         char exe[MAX_PATH], candidate[MAX_PATH + 32], *slash;
         GetModuleFileNameA(NULL, exe, sizeof(exe));
@@ -180,6 +196,7 @@ int main(int argc, char **argv)
         Fv_AddProject(exe);
         snprintf(candidate, sizeof(candidate), "%s\\..\\STM32F429\\Game_LCD", exe);
         if (GetFileAttributesA(candidate) != INVALID_FILE_ATTRIBUTES) Fv_AddProject(candidate);
+#endif
         result = Fv_RunHost(folder, &cfg, &adapter);
     }
     if (adapter.dll) FreeLibrary((HMODULE)adapter.dll);

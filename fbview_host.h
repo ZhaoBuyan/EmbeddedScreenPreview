@@ -5,6 +5,10 @@
 #ifndef __FBVIEW_HOST_H
 #define __FBVIEW_HOST_H
 
+#ifdef FV_BUILTIN_DEMO
+#define FV_DEMO_PROJECT "<Demo>"
+#endif
+
 #include "fbview.h"
 #include "fv_sim.h"
 

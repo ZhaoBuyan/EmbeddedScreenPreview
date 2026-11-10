@@ -9,7 +9,7 @@
  *   gcc -std=c11 -O2 -shared -DFBVIEW_BUILD_DLL -I. -o demo_adapter.dll demo_adapter.c
  ******************************************************************************
  */
-#ifndef FBVIEW_BUILD_DLL
+#if !defined(FBVIEW_BUILD_DLL) && !defined(FV_BUILTIN_DEMO)
 #define FBVIEW_BUILD_DLL
 #endif
 #include "fbview.h"
