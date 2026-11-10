@@ -206,32 +206,47 @@ static void ensure_tmp_dir(void)
 }
 static int run_tool(const char *cmdline, const char *log_path, const char *work_dir)
 {
-    STARTUPINFOA si;
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOA        si;
     PROCESS_INFORMATION pi;
+    HANDLE hlog, hnul;
     DWORD  exit_code = (DWORD)-1;
-    char  *full;
+    char  *cmd;
     int    ok;
-    size_t need;
 
-    /* 用 cmd.exe 做重定向，而不是给子进程塞句柄 ——
-       句柄继承方式会让 gcc 的进程启动器报
-       "Cannot create temporary file ... Permission denied"，很难查。*/
-    need = strlen(cmdline) + strlen(log_path) + 64;
-    full = (char *)malloc(need);
-    if (full == NULL) { return -1; }
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
 
-    _snprintf(full, need, "cmd.exe /c %s > \"%s\" 2>&1", cmdline, log_path);
-    full[need - 1] = '\0';
+    hlog = CreateFileA(log_path, GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hlog == INVALID_HANDLE_VALUE) { return -1; }
+
+    /* stdin 必须给真实句柄：塞 INVALID_HANDLE_VALUE 会让 gcc 的进程启动器出错 */
+    hnul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ, &sa,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
     memset(&si, 0, sizeof(si));
     si.cb          = sizeof(si);
-    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.dwFlags     = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
+    si.hStdOutput  = hlog;
+    si.hStdError   = hlog;
+    si.hStdInput   = hnul;
+
+    cmd = (char *)malloc(strlen(cmdline) + 8);
+    if (cmd == NULL)
+    {
+        if (hnul != INVALID_HANDLE_VALUE) { CloseHandle(hnul); }
+        CloseHandle(hlog);
+        return -1;
+    }
+    strcpy(cmd, cmdline);
 
     memset(&pi, 0, sizeof(pi));
-    ok = CreateProcessA(NULL, full, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+    ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
                         NULL, work_dir, &si, &pi);
-    free(full);
+    free(cmd);
 
     if (ok)
     {
@@ -241,6 +256,8 @@ static int run_tool(const char *cmdline, const char *log_path, const char *work_
         CloseHandle(pi.hThread);
     }
 
+    if (hnul != INVALID_HANDLE_VALUE) { CloseHandle(hnul); }
+    CloseHandle(hlog);
     return (int)exit_code;
 }
 /* ============================================================================
@@ -433,6 +450,7 @@ int Fv_LoadAdapter(const char *folder, const FvConfig *cfg,
         char dll_path[MAX_PATH];
         char log_path[MAX_PATH];
         char build_dir[MAX_PATH];
+        char cache_dir[MAX_PATH];
         char inc_flags[1024];
         char def_flags[512];
         char *tok;
@@ -444,14 +462,33 @@ int Fv_LoadAdapter(const char *folder, const FvConfig *cfg,
             if (p != NULL) { *p = '\0'; }
         }
 
+        /* 日志放项目里，方便用户看编译错误 */
         _snprintf(build_dir, sizeof(build_dir), "%s\\_fbview", folder);
         build_dir[sizeof(build_dir) - 1] = '\0';
         dir_exists_or_create(build_dir);
 
-        _snprintf(dll_path, sizeof(dll_path), "%s\\adapter.dll", build_dir);
-        dll_path[sizeof(dll_path) - 1] = '\0';
         _snprintf(log_path, sizeof(log_path), "%s\\build.log", build_dir);
         log_path[sizeof(log_path) - 1] = '\0';
+
+        /* ⚠️ 编译产物必须放在【纯 ASCII】目录里：
+         *    mingw 的 ld 打不开含非 ASCII 字符的绝对输出路径
+         *    （报 cannot open output file ...: No such file or directory），
+         *    而 CreateProcess 用中文目录当工作目录也不总可靠。
+         *    所以用工程路径的哈希做文件名，缓存到 <ASCII临时目录>\fbview_cache\。
+         *    顺带解决了"不同工程同名 DLL 互相覆盖"的问题。*/
+        {
+            uint32_t h = 2166136261u;          /* FNV-1a */
+            const char *s = folder;
+            while (*s != '\0') { h ^= (uint8_t)(*s++); h *= 16777619u; }
+
+            _snprintf(cache_dir, sizeof(cache_dir), "%s\\fbview_cache", s_tmp_dir);
+            cache_dir[sizeof(cache_dir) - 1] = '\0';
+            dir_exists_or_create(cache_dir);
+
+            _snprintf(dll_path, sizeof(dll_path), "%s\\%08lx.dll",
+                      cache_dir, (unsigned long)h);
+            dll_path[sizeof(dll_path) - 1] = '\0';
+        }
 
         /* includes: 分号或逗号分隔，相对 folder */
         inc_flags[0] = '\0';
@@ -499,7 +536,13 @@ int Fv_LoadAdapter(const char *folder, const FvConfig *cfg,
 
         DeleteFileA(dll_path);
 
-        /* 拼 gcc 命令行：源文件相对 folder */
+        /* 拼 gcc 命令行
+         *
+         * ⚠️ -o 必须用【相对路径】（配合 run_tool 把工作目录设成 folder）：
+         *    mingw 的 ld 打不开"含非 ASCII 字符的绝对输出路径"，
+         *    会报 `cannot open output file ...: No such file or directory`。
+         *    读输入文件用绝对中文路径没问题，只有输出受影响。
+         *    改成相对路径 + 正确的工作目录就绕开了。 */
         _snprintf(cmd, sizeof(cmd),
                   "gcc -std=c11 -O2 -shared -DFBVIEW_BUILD_DLL %s %s "
                   "-o \"%s\" ",
